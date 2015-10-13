@@ -16,7 +16,7 @@ There are some kind of configurations.
 The configurations must be inside server directive.
 
 |Key|Description|Default|
-|-|-|-|
+|---|---|---|
 |access_filter|enable filter or not. can takes on or off|off|
 |access_filter_threshold_interval|interval time (millisec) counted as continuous access. |1000 (millisec)|
 |access_filter_threshold_count|access count which is recognized as too much access.|10|
