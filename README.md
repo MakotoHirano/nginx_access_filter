@@ -7,13 +7,12 @@ And if the count exceed certain count while certain time (the count and time are
 And the case you don't want to count all files. (ex. you want to count only html extension but not image files like jpg, png, gif)
 You can set URI to be counted or not using regular expression on confing file.
 
-This module use process closed space for saving data to fasten process.
-It means if you set multiple worker process, they can't share each data.
-So this module is adaptable for only minimal single core environment that have only one worker process.
+This module uses unix os shared memory segment to save access histories.
+so of course, if there are multiple worker processes, they can access same memory spaces.
 
 ### Configuration
 There are some kind of configurations.
-The configurations must be inside server directive.
+The configurations must be inside http directive.
 
 |Key|Description|Default|
 |---|---|---|
@@ -26,7 +25,7 @@ The configurations must be inside server directive.
 
 #### Example
 Then I will show you example configuration below.
-If there are client which access over 10 count in 1000 millisec, the nginx server will response 403 for 30 seconds.
+If there are client which access over 10 count in 1000 millisec, the nginx http will response 403 for 30 seconds.
 
 ```
 server {
@@ -45,7 +44,7 @@ server {
 Just as ordinal. add --add-module options to configure.
 
 ```
-./configure --add-module=/path/to/nginx_access_filter_module
+./configure --add-module=/path/to/nginx_access_filter_module --with-ld-opt="-lrt"
 make
 make install
 ```

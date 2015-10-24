@@ -5,8 +5,20 @@
 #include <ngx_http.h>
 #include <stdio.h>
 #include <time.h>
-#include <sys/time.h>
+#include <fcntl.h>
 #include <regex.h>
+#include <sys/time.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+#define KEY_SEMAPHORE "./semaphore_nginx_access_filter"
+#define KEY_SHMEM "./shmem_nginx_access_filter"
+#define NGX_AF_OK 0
+#define NGX_AF_NG -1
+#define LOCK -1
+#define UNLOCK 1
 
 /**
  * directive struct
@@ -17,14 +29,14 @@ typedef struct {
 	ngx_uint_t threshold_count;      // continuous count to be banned.
 	ngx_uint_t time_to_be_banned;    // limited interval to access site. (second)
 	ngx_uint_t bucket_size;          // max size of bucket to hold each ip.
-	ngx_str_t except_regex;          // except_regex of target filename
+	char* except_regex;          // except_regex of target filename
 } ngx_http_access_filter_conf_t;
 
 typedef struct hashtable_entry_s hashtable_entry_t;
 typedef struct fifo_entry_s fifo_entry_t;
 
 struct hashtable_entry_s {
-	char *ip;
+	char ip[16];
 	struct timeval last_access_time;
 	struct timeval banned_from;
 	ngx_uint_t access_count;
@@ -42,12 +54,14 @@ struct fifo_entry_s {
 
 // nginx functions
 static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf);
-static char * ngx_http_access_filter_merge_conf(ngx_conf_t *cf, void *parent, void *child);
+static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *conf);
 static ngx_int_t ngx_http_access_filter_postconfig(ngx_conf_t *cf);
 static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r);
 
 // user functions
-static ngx_int_t _initialize(ngx_http_request_t *r);
+static ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
+static int _get_semaphore(void);
+static int _ctl_semaphore(int op);
 static void _update_reference(hashtable_entry_t *he);
 static void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he);
 static void _create_reference(ngx_uint_t hash, char* remote_ip);
@@ -57,64 +71,68 @@ static void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash);
 static ngx_int_t _get_next_index(ngx_int_t current_index, ngx_int_t bucket_size);
 static ngx_int_t _get_previous_index(ngx_int_t current_index, ngx_int_t bucket_size);
 static ngx_int_t _hash(char *str, ngx_uint_t bucket_size);
+static ngx_int_t init_module(ngx_cycle_t *cycle);
+static void exit_master(ngx_cycle_t *cycle);
 
 static fifo_entry_t **fifo_ptr;
 static fifo_entry_t *fifo_head;
 static hashtable_entry_t **hashtable_ptr;
-static ngx_uint_t init_flg = 0;
 static ngx_http_request_t *ctx_r;
 static regex_t regex_buffer;
+static int shmid = -1;
+static int semid = -1;
+static void* shm_ptr = NULL;
 
 static ngx_command_t ngx_http_access_filter_commands[] = {
 	{
 		ngx_string("access_filter"),
-		NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_flag_slot,
-		NGX_HTTP_SRV_CONF_OFFSET,
+		NGX_HTTP_MAIN_CONF_OFFSET,
 		offsetof(ngx_http_access_filter_conf_t, enable),
 		NULL
 	},
 
 	{
 		ngx_string("access_filter_threshold_interval"),
-		NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_num_slot,
-		NGX_HTTP_SRV_CONF_OFFSET,
+		NGX_HTTP_MAIN_CONF_OFFSET,
 		offsetof(ngx_http_access_filter_conf_t, threshold_interval),
 		NULL
 	},
 
 	{
 		ngx_string("access_filter_threshold_count"),
-		NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_num_slot,
-		NGX_HTTP_SRV_CONF_OFFSET,
+		NGX_HTTP_MAIN_CONF_OFFSET,
 		offsetof(ngx_http_access_filter_conf_t, threshold_count),
 		NULL
 	},
 
 	{
 		ngx_string("access_filter_time_to_be_banned"),
-		NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_num_slot,
-		NGX_HTTP_SRV_CONF_OFFSET,
+		NGX_HTTP_MAIN_CONF_OFFSET,
 		offsetof(ngx_http_access_filter_conf_t, time_to_be_banned),
 		NULL
 	},
 
 	{
 		ngx_string("access_filter_bucket_size"),
-		NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_num_slot,
-		NGX_HTTP_SRV_CONF_OFFSET,
+		NGX_HTTP_MAIN_CONF_OFFSET,
 		offsetof(ngx_http_access_filter_conf_t, bucket_size),
 		NULL
 	},
 	{
 		ngx_string("access_filter_except_regex"),
-		NGX_HTTP_SRV_CONF | NGX_CONF_TAKE1,
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_str_slot,
-		NGX_HTTP_SRV_CONF_OFFSET,
+		NGX_HTTP_MAIN_CONF_OFFSET,
 		offsetof(ngx_http_access_filter_conf_t, except_regex),
 		NULL
 	},
@@ -126,11 +144,11 @@ static ngx_http_module_t ngx_http_access_filter_module_ctx = {
 	NULL, /* preconfiguration */
 	ngx_http_access_filter_postconfig, /* postconfiguration */
 
-	NULL, /* create main configuation */
-	NULL, /* init main configuation */
+	ngx_http_access_filter_create_conf, /* create main configuation */
+	ngx_http_access_filter_init_conf, /* init main configuation */
 
-	ngx_http_access_filter_create_conf, /* create server configuration */
-	ngx_http_access_filter_merge_conf,   /* merge server configuration */
+	NULL, /* create server configuration */
+	NULL,   /* merge server configuration */
 
 	NULL, /* create location configuration */
 	NULL  /* merge location configuration */
@@ -142,14 +160,64 @@ ngx_module_t ngx_http_access_filter_module = {
 	ngx_http_access_filter_commands, /* module directives */
 	NGX_HTTP_MODULE, /* module type */
 	NULL, /* init master */
-	NULL, /* init module */
+	init_module, /* init module */
 	NULL, /* init process */
 	NULL, /* init thread */
 	NULL, /* exit thread */
 	NULL, /* exit process */
-	NULL, /* exit master */
+	exit_master, /* exit master */
 	NGX_MODULE_V1_PADDING
 };
+
+static ngx_int_t init_module(ngx_cycle_t *cycle)
+{
+	ngx_http_access_filter_conf_t *afcf;
+	afcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_access_filter_module);
+
+#ifdef DEBUG
+	ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "init_module called. enable: %d, threshold_interval: %d, threshold_count: %d, time_to_be_banned: %d, bucket_size: %d",
+		afcf->enable, afcf->threshold_interval, afcf->threshold_count, afcf->time_to_be_banned, afcf->bucket_size);
+#endif
+
+	semid = _get_semaphore();
+
+	if (_ctl_semaphore(LOCK) == NGX_AF_NG) {
+		ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "init_module#failed to lock semaphore. will exit.");
+		return NGX_ERROR;
+	}
+
+	if (_initialize_shmem(cycle, afcf) == NGX_AF_NG) {
+		ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "init_module#failed to initialize shmem. will exit.");
+		return NGX_ERROR;
+	}
+
+	if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
+		ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "init_module#failed to unlock semaphore. will exit.");
+		return NGX_ERROR;
+	}
+
+	return NGX_OK;
+}
+
+static void exit_master(ngx_cycle_t *cycle)
+{
+#ifdef DEBUG
+	ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "exit master called.");
+#endif
+
+	//
+	// cleanup.
+	//
+	if (shmid != NGX_AF_NG && shm_unlink(KEY_SHMEM) == -1) {
+		ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "exit_master: shm_unlink failed.");
+	}
+
+	if (semid != NGX_AF_NG && semctl(semid, 0, IPC_RMID) == -1) {
+		ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "exit_master: remove semaphore failed.");
+	}
+
+	return;
+}
 
 static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 {
@@ -165,22 +233,21 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 	conf->threshold_count = NGX_CONF_UNSET_UINT;
 	conf->time_to_be_banned = NGX_CONF_UNSET_UINT;
 	conf->bucket_size = NGX_CONF_UNSET_UINT;
-	conf->except_regex.data = NULL;
+	conf->except_regex = NGX_CONF_UNSET_PTR;
 
 	return conf;
 }
 
-static char * ngx_http_access_filter_merge_conf(ngx_conf_t *cf, void *parent, void *child)
+static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 {
-	ngx_http_access_filter_conf_t *prev = parent;
-	ngx_http_access_filter_conf_t *conf = child;
+	ngx_http_access_filter_conf_t *conf = _conf;
 
-	ngx_conf_merge_value(conf->enable, prev->enable, 0);
-	ngx_conf_merge_uint_value(conf->threshold_interval, prev->threshold_interval, 1000); // msec
-	ngx_conf_merge_uint_value(conf->threshold_count, prev->threshold_count, 10);
-	ngx_conf_merge_uint_value(conf->time_to_be_banned, prev->time_to_be_banned, 60 * 60); // sec
-	ngx_conf_merge_uint_value(conf->bucket_size, prev->bucket_size, 50);
-	ngx_conf_merge_str_value(conf->except_regex, prev->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
+	ngx_conf_init_value(conf->enable, 0);
+	ngx_conf_init_uint_value(conf->threshold_interval, 1000); // msec
+	ngx_conf_init_uint_value(conf->threshold_count, 10);
+	ngx_conf_init_uint_value(conf->time_to_be_banned, 60 * 60); // sec
+	ngx_conf_init_uint_value(conf->bucket_size, 50);
+	ngx_conf_init_ptr_value(conf->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
 
 	if (conf->enable != 1 && conf->enable != 0) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "enable must be on or off");
@@ -244,58 +311,57 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 	int regret;
 
 	ctx_r = r;
-	afcf = ngx_http_get_module_srv_conf(r, ngx_http_access_filter_module);
+	afcf = ngx_http_get_module_main_conf(r, ngx_http_access_filter_module);
 
 	//
 	// check enable config.
+	//
 	if (afcf->enable == 0) {
 		ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "*** ngx_http_access_header_handler disabled. will return. ***");
 		return NGX_DECLINED;
 	}
 
 	//
-	// do initialize.
-	if (init_flg == 0) {
-		_initialize(r);
-		init_flg = 1;
-	}
-
-	//
 	// filter except regex.
-	uri = malloc(sizeof(char) * (r->uri.len+1));
+	//
+	uri = ngx_pcalloc(r->pool, sizeof(char) * (r->uri.len+1));
 	strncpy(uri, (char *) r->uri.data, r->uri.len);
 	uri[r->uri.len] = '\0';
 	regret = regexec(&regex_buffer, uri, 0, NULL, 0);
+	ngx_pfree(r->pool, uri);
 
 	if (regret == 0) { // matched.
 		return NGX_DECLINED;
 	}
 
-	free(uri);
-
 	gettimeofday(&now, NULL);
 
 	//
 	// get remote ip.
-	remote_ip = malloc(sizeof(char) * (r->connection->addr_text.len+1));
+	//
+	// remote_ip = malloc(sizeof(char) * (r->connection->addr_text.len+1));
+	remote_ip = ngx_pcalloc(r->pool, sizeof(char) * (r->connection->addr_text.len+1));
 	strncpy(remote_ip, (char *) r->connection->addr_text.data, r->connection->addr_text.len);
 	remote_ip[r->connection->addr_text.len] = '\0';
 
 	//
 	// traverse hashtable_ptr.
+	//
 	hash = _hash(remote_ip, afcf->bucket_size);
 
 	for(hash_p = hashtable_ptr[hash]; hash_p != NULL; hash_p = hash_p->p_next) {
-		if (hash_p->ip != NULL) {
+		if (strlen(hash_p->ip) != 0 && hash_p->ip != NULL) {
 			if ((strlen(hash_p->ip) == r->connection->addr_text.len)
-				&& (strncmp((char *)hash_p->ip, remote_ip, r->connection->addr_text.len) == 0)) {
+				&& (strncmp(hash_p->ip, remote_ip, r->connection->addr_text.len) == 0)) {
 				hash_exist_p = hash_p;
+				break;
 			}
 		}
 	}
 
 	//
 	// already exists.
+	//
 	if (hash_exist_p != NULL) {
 		if (timerisset(&hash_exist_p->banned_from)) {
 			timersub(&now, &hash_exist_p->banned_from, &diff);
@@ -314,13 +380,30 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 		ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "access elapsed: %.3f, threshold: %.3f", elapsed, afcf->threshold_interval/1000.0);
 
 		if ((timerisset(&hash_exist_p->last_access_time) == 0) || (elapsed >= (double) afcf->threshold_interval / 1000.0)) {
+			if (_ctl_semaphore(LOCK) == NGX_AF_NG) {
+				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to lock semaphore.");
+				return NGX_DECLINED;
+			}
 			_reconstruct_reference(hash, hash_exist_p);
+			if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
+				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to unlock semaphore.");
+				return NGX_DECLINED;
+			}
 
 		} else {
+			if (_ctl_semaphore(LOCK) == NGX_AF_NG) {
+				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to lock semaphore.");
+				return NGX_DECLINED;
+			}
 			_update_reference(hash_exist_p);
+			if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
+				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to unlock semaphore.");
+				return NGX_DECLINED;
+			}
 
 			//
 			// check threshold.
+			//
 			if (hash_exist_p->access_count >= afcf->threshold_count) {
 				ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "over access. ip: %s, count: %d", hash_exist_p->ip, hash_exist_p->access_count);
 				timerclear(&hash_exist_p->last_access_time);
@@ -330,12 +413,68 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 		}
 
 	} else {
+		if (_ctl_semaphore(LOCK) == NGX_AF_NG) {
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to lock semaphore.");
+			return NGX_DECLINED;
+		}
 		_create_reference(hash, remote_ip);
+		if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to unlock semaphore.");
+			return NGX_DECLINED;
+		}
 	}
 
-	free(remote_ip);
+	ngx_pfree(r->pool, remote_ip);
 
 	return NGX_DECLINED;
+}
+
+static int _get_semaphore(void)
+{
+	int semid;
+	union semnum {
+		int val;
+		struct semid_ds *buf;
+		ushort *array;
+	} semval;
+
+
+	if ((semid = semget(ftok(KEY_SEMAPHORE, 1), 1, IPC_CREAT|S_IRWXU|S_IRWXG|S_IRWXO)) == -1) {
+		perror("semget");
+		return -1;
+	}
+
+	if (semctl(semid, 0, GETVAL, semval) == -1) {
+		perror("semctl get");
+		return -1;
+	}
+
+	semval.val = 1;
+	if (semctl(semid, 0, SETVAL, semval) == -1) {
+		perror("semctl set");
+		return -1;
+	}
+
+	return semid;
+}
+
+static int _ctl_semaphore(int op)
+{
+	struct sembuf sops[1];
+
+	if (semid == -1) {
+		return NGX_AF_NG;
+	}
+
+	sops[0].sem_num = 0;
+	sops[0].sem_op = op;
+	sops[0].sem_flg = 0;
+
+	if (semop(semid, sops, 1) == -1) {
+		return NGX_AF_NG;
+	}
+
+	return NGX_AF_OK;
 }
 
 static void _update_reference(hashtable_entry_t *he)
@@ -350,6 +489,7 @@ static void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he)
 
 	//
 	// initialize (except ip)
+	//
 	he->access_count = 1;
 	gettimeofday(&he->last_access_time, NULL);
 	timerclear(&he->banned_from);
@@ -365,7 +505,6 @@ static void _create_reference(ngx_uint_t hash, char *remote_ip)
 {
 	fifo_entry_t *fe;
 	hashtable_entry_t *he;
-	char *remote_ip_persist;
 	int len = 0;
 
 	fe = fifo_head->p_prev; // latest
@@ -373,19 +512,17 @@ static void _create_reference(ngx_uint_t hash, char *remote_ip)
 
 	//
 	// initialize
+	//
 	he->access_count = 1;
 	gettimeofday(&he->last_access_time, NULL);
 	timerclear(&he->banned_from);
 
 	if (remote_ip != NULL) {
 		len = strlen(remote_ip);
-		if (he->ip != NULL) {
+		if (strlen(he->ip) != 0 && he->ip != NULL) {
 			free(he->ip);
 		}
-		remote_ip_persist = malloc(sizeof(char) * (len + 1));
-		strncpy(remote_ip_persist, remote_ip, len);
-		remote_ip_persist[len] = '\0';
-		he->ip = remote_ip;
+		strncpy(he->ip, remote_ip, len);
 	}
 
 	_delete_hashtable_reference(he);
@@ -444,71 +581,85 @@ static void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash)
 	hashtable_ptr[hash] = he;
 }
 
-static ngx_int_t _initialize(ngx_http_request_t *r)
+static ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 {
-	char *regex;
-	ngx_http_access_filter_conf_t *afcf;
-	ngx_uint_t i;
+#ifdef DEBUG
+	ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "_initialize_shmem called.");
+#endif
 
-	afcf = ngx_http_get_module_srv_conf(r, ngx_http_access_filter_module);
+	char *regex;
+	ngx_uint_t i;
+	int memsize;
+
+	//
+	// get shared memory.
+	//
+	memsize = afcf->bucket_size *
+		(
+			sizeof(fifo_entry_t) + sizeof(hashtable_entry_t) +
+			sizeof(fifo_entry_t *) + sizeof(hashtable_entry_t *)
+		);
+	shmid = shm_open(KEY_SHMEM, O_RDWR|O_CREAT, S_IRWXU|S_IRWXG|S_IRWXO);
+	ftruncate(shmid, memsize);
+	if ((shm_ptr = mmap(0, memsize, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_SHARED, shmid, 0)) == MAP_FAILED) {
+		return NGX_AF_NG;
+	}
 
 	//
 	// initialize fifo_ptr.
 	// make fifo_ptr pool.
 	//
-	fifo_ptr = malloc(sizeof(fifo_entry_t*) * afcf->bucket_size);
+	fifo_entry_t **fifo_pp, *fifo_p;
 
-	for (i=0; i < afcf->bucket_size; i++) {
-		fifo_ptr[i] = malloc(sizeof(fifo_entry_t));
-	}
-
+	fifo_head = fifo_p = shm_ptr;
+	fifo_ptr = fifo_pp = (fifo_entry_t**) ((char *)shm_ptr + sizeof(fifo_entry_t) * afcf->bucket_size);
 	for (i=0; i < afcf->bucket_size; i++) {
 		int next = _get_next_index(i, afcf->bucket_size);
 		int prev = _get_previous_index(i, afcf->bucket_size);
 
-		fifo_ptr[i]->p_next = fifo_ptr[next];
-		fifo_ptr[i]->p_prev = fifo_ptr[prev];
-		fifo_ptr[i]->p_hash = NULL;
+		fifo_p[i].p_next = &fifo_p[next];
+		fifo_p[i].p_prev = &fifo_p[prev];
+		fifo_p[i].p_hash = NULL;
+
+		fifo_pp[i] = &fifo_p[i];
 	}
 
 	//
 	// initialize hashtable_ptr.
 	// make hashtable_ptr pool.
 	//
-	hashtable_ptr = malloc(sizeof(hashtable_entry_t*) * afcf->bucket_size);
+	hashtable_entry_t **hashtable_pp, *hashtable_p;
+
+	hashtable_p = (hashtable_entry_t*) ((char *) shm_ptr + (sizeof(fifo_entry_t) + sizeof(fifo_entry_t*)) * afcf->bucket_size);
+	hashtable_ptr = hashtable_pp = (hashtable_entry_t**) ((char *) shm_ptr + (sizeof(fifo_entry_t) + sizeof(fifo_entry_t*) + sizeof(hashtable_entry_t)) * afcf->bucket_size);
 	for (i=0; i<afcf->bucket_size; i++) {
-		hashtable_ptr[i] = malloc(sizeof(hashtable_entry_t));
+		hashtable_p[i].ip[0] = '\0';
+		gettimeofday(&hashtable_p[i].last_access_time, NULL);
+		timerclear(&hashtable_p[i].banned_from);
+		hashtable_p[i].access_count = 0;
+		hashtable_p[i].p_next = NULL;
+		hashtable_p[i].p_prev = NULL;
+		hashtable_p[i].p_fifo = NULL;
+		hashtable_p[i].hash = i;
+
+		hashtable_pp[i] = &hashtable_p[i];
 	}
-	for (i=0; i<afcf->bucket_size; i++) {
-		hashtable_ptr[i]->ip = NULL;
-		gettimeofday(&hashtable_ptr[i]->last_access_time, NULL);
-		timerclear(&hashtable_ptr[i]->banned_from);
-		hashtable_ptr[i]->access_count = 0;
-		hashtable_ptr[i]->p_next = NULL;
-		hashtable_ptr[i]->p_prev = NULL;
-		hashtable_ptr[i]->p_fifo = NULL;
-		hashtable_ptr[i]->hash = i;
-	}
+
 
 	//
 	// update each reference.
 	//
 	for (i=0; i<afcf->bucket_size; i++) {
 		fifo_ptr[i]->p_hash = hashtable_ptr[i];
-	}
-
-	for (i=0; i<afcf->bucket_size; i++) {
 		hashtable_ptr[i]->p_fifo = fifo_ptr[i];
 	}
 
-	fifo_head = fifo_ptr[0];
-
 	//
 	// compile regex.
-	regex = malloc(sizeof(char) * (afcf->except_regex.len + 1));
-	strncpy(regex, (char *) afcf->except_regex.data, afcf->except_regex.len);
-	regex[afcf->except_regex.len] = '\0';
-	regcomp(&regex_buffer, regex, REG_EXTENDED | REG_NEWLINE | REG_NOSUB);
+	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
+	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
+	regex[strlen(afcf->except_regex)] = '\0';
+	regcomp(&regex_buffer, regex, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
 	free(regex);
 
 	return NGX_OK;
