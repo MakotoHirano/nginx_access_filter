@@ -57,22 +57,22 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf);
 static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *conf);
 static ngx_int_t ngx_http_access_filter_postconfig(ngx_conf_t *cf);
 static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r);
-
-// user functions
-static ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
-static int _get_semaphore(void);
-static int _ctl_semaphore(int op);
-static void _update_reference(hashtable_entry_t *he);
-static void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he);
-static void _create_reference(ngx_uint_t hash, char* remote_ip);
-static void _update_fifo_reference(fifo_entry_t *fe);
-static void _delete_hashtable_reference(hashtable_entry_t *he);
-static void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash);
-static ngx_int_t _get_next_index(ngx_int_t current_index, ngx_int_t bucket_size);
-static ngx_int_t _get_previous_index(ngx_int_t current_index, ngx_int_t bucket_size);
-static ngx_int_t _hash(char *str, ngx_uint_t bucket_size);
 static ngx_int_t init_module(ngx_cycle_t *cycle);
 static void exit_master(ngx_cycle_t *cycle);
+
+// user functions
+ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
+int _get_semaphore(void);
+int _ctl_semaphore(int op);
+void _update_reference(hashtable_entry_t *he);
+void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he);
+void _create_reference(ngx_uint_t hash, char* remote_ip);
+void _update_fifo_reference(fifo_entry_t *fe);
+void _delete_hashtable_reference(hashtable_entry_t *he);
+void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash);
+ngx_int_t _get_next_index(ngx_int_t current_index, ngx_int_t bucket_size);
+ngx_int_t _get_previous_index(ngx_int_t current_index, ngx_int_t bucket_size);
+ngx_int_t _hash(char *str, ngx_uint_t bucket_size);
 
 static fifo_entry_t **fifo_ptr;
 static fifo_entry_t *fifo_head;
@@ -429,7 +429,7 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 	return NGX_DECLINED;
 }
 
-static int _get_semaphore(void)
+int _get_semaphore(void)
 {
 	int semid;
 	union semnum {
@@ -458,7 +458,7 @@ static int _get_semaphore(void)
 	return semid;
 }
 
-static int _ctl_semaphore(int op)
+int _ctl_semaphore(int op)
 {
 	struct sembuf sops[1];
 
@@ -477,12 +477,12 @@ static int _ctl_semaphore(int op)
 	return NGX_AF_OK;
 }
 
-static void _update_reference(hashtable_entry_t *he)
+void _update_reference(hashtable_entry_t *he)
 {
 	he->access_count++;
 }
 
-static void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he)
+void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he)
 {
 	fifo_entry_t *fe;
 	fe = he->p_fifo;
@@ -501,7 +501,7 @@ static void _reconstruct_reference(ngx_uint_t hash, hashtable_entry_t *he)
 	_update_fifo_reference(fe);
 }
 
-static void _create_reference(ngx_uint_t hash, char *remote_ip)
+void _create_reference(ngx_uint_t hash, char *remote_ip)
 {
 	fifo_entry_t *fe;
 	hashtable_entry_t *he;
@@ -517,20 +517,16 @@ static void _create_reference(ngx_uint_t hash, char *remote_ip)
 	gettimeofday(&he->last_access_time, NULL);
 	timerclear(&he->banned_from);
 
-	if (remote_ip != NULL) {
-		len = strlen(remote_ip);
-		if (strlen(he->ip) != 0 && he->ip != NULL) {
-			free(he->ip);
-		}
-		strncpy(he->ip, remote_ip, len);
-	}
+	len = strlen(remote_ip);
+	strncpy(he->ip, remote_ip, len);
+	he->ip[len] = '\0';
 
 	_delete_hashtable_reference(he);
 	_insert_hashtable_reference(he, hash);
 	_update_fifo_reference(fe);
 }
 
-static void _update_fifo_reference(fifo_entry_t *fe)
+void _update_fifo_reference(fifo_entry_t *fe)
 {
 	if (fifo_head == fe) {
 		return;
@@ -550,7 +546,7 @@ static void _update_fifo_reference(fifo_entry_t *fe)
 	fifo_head = fe;
 }
 
-static void _delete_hashtable_reference(hashtable_entry_t *he)
+void _delete_hashtable_reference(hashtable_entry_t *he)
 {
 	if (he->p_prev != NULL) {
 		he->p_prev->p_next = he->p_next;
@@ -563,7 +559,7 @@ static void _delete_hashtable_reference(hashtable_entry_t *he)
 	}
 }
 
-static void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash)
+void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash)
 {
 	hashtable_entry_t *head;
 	head = hashtable_ptr[hash];
@@ -581,7 +577,7 @@ static void _insert_hashtable_reference(hashtable_entry_t *he, ngx_uint_t hash)
 	hashtable_ptr[hash] = he;
 }
 
-static ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
+ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 {
 #ifdef DEBUG
 	ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "_initialize_shmem called.");
@@ -656,6 +652,7 @@ static ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_co
 
 	//
 	// compile regex.
+	//
 	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
 	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
 	regex[strlen(afcf->except_regex)] = '\0';
@@ -665,7 +662,7 @@ static ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_co
 	return NGX_OK;
 }
 
-static ngx_int_t _get_next_index(ngx_int_t current_index, ngx_int_t bucket_size)
+ngx_int_t _get_next_index(ngx_int_t current_index, ngx_int_t bucket_size)
 {
 	int next = current_index + 1;
 	if (next >= bucket_size) {
@@ -674,7 +671,7 @@ static ngx_int_t _get_next_index(ngx_int_t current_index, ngx_int_t bucket_size)
 	return next;
 }
 
-static ngx_int_t _get_previous_index(ngx_int_t current_index, ngx_int_t bucket_size)
+ngx_int_t _get_previous_index(ngx_int_t current_index, ngx_int_t bucket_size)
 {
 	int prev = current_index - 1;
 	if (prev < 0) {
@@ -686,9 +683,9 @@ static ngx_int_t _get_previous_index(ngx_int_t current_index, ngx_int_t bucket_s
 /**
  * create hash value from string
  */
-static ngx_int_t _hash(char *str, ngx_uint_t bucket_size)
+ngx_int_t _hash(char *str, ngx_uint_t bucket_size)
 {
-	ngx_uint_t hash = 27, i, len = strlen(str);
+	ngx_uint_t hash = 31, i, len = strlen(str);
 
 	for (i=0; i<len; i++) {
 		hash *= str[i];
