@@ -1,32 +1,19 @@
 /* Makoto Hiano. All rights reserved. */
-#include <ngx_http_access_filter_module.h>
+#include "ngx_http_access_filter_module.h"
 
 /**
  * function pointers.
  * it behaves like interface.
  */
 typedef struct {
-	int (*init)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf) = NULL;
-	void* (*get_entry)(char *key, ngx_http_access_filter_conf_t *afcf) = NULL;
-	storage_entry_t* (*get_data)(void *entry_p) = NULL;
-	int (*add_count)(storage_entry_t *data, ngx_http_access_filter_conf_t *afcf) = NULL;
-	int (*update_entry)(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf) = NULL;
-	int (*create_entry)(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf) = NULL;
-	int (*fin)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf) = NULL;
+	int (*init)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
+	void* (*get_entry)(char *key, ngx_http_access_filter_conf_t *afcf);
+	storage_entry_t* (*get_data)(void *entry_p);
+	int (*add_count)(storage_entry_t *data, ngx_http_access_filter_conf_t *afcf);
+	int (*update_entry)(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
+	int (*create_entry)(char *key, ngx_http_access_filter_conf_t *afcf);
+	int (*fin)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
 } storage_accessor;
-
-/**
- * directive struct
- */
-typedef struct {
-	ngx_flag_t enable;               // enable flag
-	ngx_uint_t threshold_interval;   // interval count as continuous access (milli second)
-	ngx_uint_t threshold_count;      // continuous count to be banned.
-	ngx_uint_t time_to_be_banned;    // limited interval to access site. (second)
-	ngx_uint_t bucket_size;          // max size of bucket to hold each ip.
-	char* except_regex;              // except_regex of target filename
-	char* storage;                   // storage of user access data.
-} ngx_http_access_filter_conf_t;
 
 // nginx functions
 static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf);
@@ -131,6 +118,7 @@ ngx_module_t ngx_http_access_filter_module = {
 
 static ngx_int_t init_module(ngx_cycle_t *cycle)
 {
+	char *regex;
 	ngx_http_access_filter_conf_t *afcf;
 	afcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_access_filter_module);
 
@@ -150,6 +138,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		accessor.update_entry = update_entry_shmem;
 		accessor.create_entry = create_entry_shmem;
 		accessor.fin = fin_shmem;
+
 	} else if (strcmp(afcf->storage, STORAGE_MEMCACHED) == 0) {
 		// TODO implements.
 
@@ -159,11 +148,19 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		return NGX_ERROR;
 	}
 
-	if ((accessor.init != NULL) && (accessor.init() == NGX_AF_NG)) {
-			ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "initialize failed.");
-			return NGX_ERROR;
-		}
+	if ((accessor.init != NULL) && (accessor.init(cycle, afcf) == NGX_AF_NG)) {
+		ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "initialize failed.");
+		return NGX_ERROR;
 	}
+
+	//
+	// compile regex.
+	//
+	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
+	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
+	regex[strlen(afcf->except_regex)] = '\0';
+	regcomp(&regex_buffer, regex, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
+	free(regex);
 
 	return NGX_OK;
 }
@@ -174,9 +171,11 @@ static void exit_master(ngx_cycle_t *cycle)
 	ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "exit master called.");
 #endif
 
-	if ((accessor.fin != NULL) && (accessor.fin(cycle) == NGX_AF_NG)) {
-			ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "fin failed.");
-		}
+	ngx_http_access_filter_conf_t *afcf;
+	afcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_access_filter_module);
+
+	if ((accessor.fin != NULL) && (accessor.fin(cycle, afcf) == NGX_AF_NG)) {
+		ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "fin failed.");
 	}
 
 	return;
@@ -317,16 +316,10 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 	// get entry.
 	//
 	if (accessor.get_entry != NULL) {
-		if ((entry_exist_p = accessor.get_entry(remote_ip, afcf)) == NGX_AF_NG) {
-			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed get_entry");
-			return NGX_DECLINED;
-		}
+		entry_exist_p = accessor.get_entry(remote_ip, afcf);
 	}
 	if (accessor.get_data != NULL) {
-		if ((data_exist_p = accessor.get_data(entry_exist_p)) == NGX_AF_NG) {
-			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed get_data");
-			return NGX_DECLINED;
-		}
+		data_exist_p = accessor.get_data(entry_exist_p);
 	}
 
 	//
@@ -365,9 +358,9 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 			// check threshold.
 			//
 			if (data_exist_p->access_count >= afcf->threshold_count) {
-				ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "over access. ip: %s, count: %d", hash_exist_p->ip, hash_exist_p->access_count);
-				timerclear(&hash_exist_p->last_access_time);
-				gettimeofday(&hash_exist_p->banned_from, NULL);
+				ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "over access. ip: %s, count: %d", remote_ip, data_exist_p->access_count);
+				timerclear(&data_exist_p->last_access_time);
+				gettimeofday(&data_exist_p->banned_from, NULL);
 				return NGX_HTTP_FORBIDDEN;
 			}
 		}

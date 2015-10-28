@@ -1,4 +1,7 @@
 /* Makoto Hiano. All rights reserved. */
+#ifndef STORAGE_MODULE_SHMEM_H
+#define STORAGE_MODULE_SHMEM_H
+
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
@@ -9,7 +12,7 @@
 #include <sys/sem.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <ngx_http_access_filter_module.h>
+#include "ngx_http_access_filter_module.h"
 
 #define KEY_SEMAPHORE "./semaphore_nginx_access_filter"
 #define KEY_SHMEM "./shmem_nginx_access_filter"
@@ -43,5 +46,7 @@ void* get_entry_shmem(char *key, ngx_http_access_filter_conf_t *afcf);
 storage_entry_t* get_data_shmem(void *entry_p);
 int add_count_shmem(storage_entry_t *data, ngx_http_access_filter_conf_t *afcf);
 int update_entry_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
-int create_entry_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
+int create_entry_shmem(char *key, ngx_http_access_filter_conf_t *afcf);
 int fin_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
+
+#endif

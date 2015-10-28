@@ -1,5 +1,4 @@
-#include <ngx_http_access_filter_module.h>
-#include <storage_module_shmem.h>
+#include "storage_module_shmem.h"
 
 static fifo_entry_t **fifo_ptr;
 static fifo_entry_t *fifo_head;
@@ -10,9 +9,10 @@ static void* shm_ptr = NULL;
 
 // private functions
 static int _get_semaphore(void);
+static int _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
 static int _ctl_semaphore(int op);
-static void _reconstruct_reference(unsigned int hash, hashtable_entry_t *he);
-static void _create_reference(char* remote_ip);
+static void _reconstruct_reference(hashtable_entry_t *he, unsigned int bucket_size);
+static void _create_reference(char* remote_ip, unsigned int bucket_size);
 static void _update_fifo_reference(fifo_entry_t *fe);
 static void _delete_hashtable_reference(hashtable_entry_t *he);
 static void _insert_hashtable_reference(hashtable_entry_t *he, unsigned int hash);
@@ -48,11 +48,11 @@ int init_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 
 void* get_entry_shmem(char *remote_ip, ngx_http_access_filter_conf_t *afcf)
 {
-	if (rempte_ip == NULL || afcf == NULL) {
+	if (remote_ip == NULL || afcf == NULL) {
 		return NULL;
 	}
 
-	hashtable_entry_t *hash_exist_p = NULL;
+	hashtable_entry_t *hash_p = NULL, *hash_exist_p = NULL;
 	unsigned int hash = _hash(remote_ip, afcf->bucket_size);
 
 	for(hash_p = hashtable_ptr[hash]; hash_p != NULL; hash_p = hash_p->p_next) {
@@ -111,7 +111,7 @@ int update_entry_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *
 		return NGX_AF_NG;
 	}
 
-	_reconstruct_reference((hashtable_entry_t*) entry_p);
+	_reconstruct_reference((hashtable_entry_t*) entry_p, afcf->bucket_size);
 
 	if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
 		ngx_log_error(NGX_LOG_ERR, ctx_r->connection->log, 0, "failed to unlock semaphore.");
@@ -121,28 +121,28 @@ int update_entry_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *
 	return NGX_AF_OK;
 }
 
-int create_entry_shmem(char *key, ngx_http_access_filter_conf_t *afcf)
+int create_entry_shmem(char *remote_ip, ngx_http_access_filter_conf_t *afcf)
 {
-	if (key == NULL || strlen(key) == 0 || afcf == NULL) {
+	if (remote_ip == NULL || strlen(remote_ip) == 0 || afcf == NULL) {
 		return NGX_AF_OK;
 	}
 
 	if (_ctl_semaphore(LOCK) == NGX_AF_NG) {
-		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to lock semaphore.");
+		ngx_log_error(NGX_LOG_ERR, ctx_r->connection->log, 0, "failed to lock semaphore.");
 		return NGX_AF_NG;
 	}
 
-	_create_reference(remote_ip);
+	_create_reference(remote_ip, afcf->bucket_size);
 
 	if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
-		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to unlock semaphore.");
+		ngx_log_error(NGX_LOG_ERR, ctx_r->connection->log, 0, "failed to unlock semaphore.");
 		return NGX_AF_NG;
 	}
 
 	return NGX_AF_OK;
 }
 
-int fin_shmem(ngx_cycle_t *cycle)
+int fin_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 {
 	if (shmid != -1 && shm_unlink(KEY_SHMEM) == -1) {
 		ngx_log_error(NGX_LOG_ERR, cycle->log, 0, "exit_master: shm_unlink failed.");
@@ -205,18 +205,18 @@ int _ctl_semaphore(int op)
 	return NGX_AF_OK;
 }
 
-void _reconstruct_reference(hashtable_entry_t *he)
+void _reconstruct_reference(hashtable_entry_t *he, unsigned int bucket_size)
 {
 	fifo_entry_t *fe;
 	fe = he->p_fifo;
-	unsigned int hash = _hash(he->ip);
+	unsigned int hash = _hash(he->ip, bucket_size);
 
 	//
 	// initialize (except ip)
 	//
-	he->access_count = 1;
-	gettimeofday(&he->last_access_time, NULL);
-	timerclear(&he->banned_from);
+	he->data.access_count = 1;
+	gettimeofday(&he->data.last_access_time, NULL);
+	timerclear(&he->data.banned_from);
 
 	if (hashtable_ptr[hash] != he) {
 		_delete_hashtable_reference(he);
@@ -225,12 +225,12 @@ void _reconstruct_reference(hashtable_entry_t *he)
 	_update_fifo_reference(fe);
 }
 
-void _create_reference(char *remote_ip)
+void _create_reference(char *remote_ip, unsigned int bucket_size)
 {
 	fifo_entry_t *fe;
 	hashtable_entry_t *he;
 	int len = 0;
-	unsigned int hash = _hash(remote_ip);
+	unsigned int hash = _hash(remote_ip, bucket_size);
 
 	fe = fifo_head->p_prev; // latest
 	he = fe->p_hash;
@@ -238,9 +238,9 @@ void _create_reference(char *remote_ip)
 	//
 	// initialize
 	//
-	he->access_count = 1;
-	gettimeofday(&he->last_access_time, NULL);
-	timerclear(&he->banned_from);
+	he->data.access_count = 1;
+	gettimeofday(&he->data.last_access_time, NULL);
+	timerclear(&he->data.banned_from);
 
 	len = strlen(remote_ip);
 	strncpy(he->ip, remote_ip, len);
@@ -302,13 +302,12 @@ void _insert_hashtable_reference(hashtable_entry_t *he, unsigned int hash)
 	hashtable_ptr[hash] = he;
 }
 
-ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
+int _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 {
 #ifdef DEBUG
 	ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "_initialize_shmem called.");
 #endif
 
-	char *regex;
 	ngx_uint_t i;
 	int memsize;
 
@@ -355,9 +354,9 @@ ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *a
 	hashtable_ptr = hashtable_pp = (hashtable_entry_t**) ((char *) shm_ptr + (sizeof(fifo_entry_t) + sizeof(fifo_entry_t*) + sizeof(hashtable_entry_t)) * afcf->bucket_size);
 	for (i=0; i<afcf->bucket_size; i++) {
 		hashtable_p[i].ip[0] = '\0';
-		gettimeofday(&hashtable_p[i].last_access_time, NULL);
-		timerclear(&hashtable_p[i].banned_from);
-		hashtable_p[i].access_count = 0;
+		gettimeofday(&hashtable_p[i].data.last_access_time, NULL);
+		timerclear(&hashtable_p[i].data.banned_from);
+		hashtable_p[i].data.access_count = 0;
 		hashtable_p[i].p_next = NULL;
 		hashtable_p[i].p_prev = NULL;
 		hashtable_p[i].p_fifo = NULL;
@@ -366,7 +365,6 @@ ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *a
 		hashtable_pp[i] = &hashtable_p[i];
 	}
 
-
 	//
 	// update each reference.
 	//
@@ -374,15 +372,6 @@ ngx_int_t _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *a
 		fifo_ptr[i]->p_hash = hashtable_ptr[i];
 		hashtable_ptr[i]->p_fifo = fifo_ptr[i];
 	}
-
-	//
-	// compile regex.
-	//
-	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
-	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
-	regex[strlen(afcf->except_regex)] = '\0';
-	regcomp(&regex_buffer, regex, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
-	free(regex);
 
 	return NGX_OK;
 }
