@@ -4,9 +4,13 @@
 static int _connect();
 static int _disconnect();
 
+static memcached_st *memc = NULL;
+
 int init_memcached(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 {
 	// concern whether keep connection or not.
+	_connect(afcf->memcached_servers);
+
 	return NGX_AF_OK;
 }
 
@@ -37,17 +41,14 @@ int create_entry_memcached(char *key, ngx_http_access_filter_conf_t *afcf)
 
 int fin_memcached(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 {
-	_disconnect();
+	if (memc != NULL) {
+		memcached_free(memc);
+	}
 }
 
-int _connect()
+int _connect(char *hosts)
 {
-	struct memcached_st *mymc;
-	struct memcached_server_st *mysrvs;
-	memcached_return rc;
+	memc = memcached(hosts, strlen(hosts));
 
-	mymc = memcached_create(NULL);
-	mysrvs = memcached_servers_parse((char *)hostname);
-	rc = memcached_server_push(mymc, mysrvs)
-
+	return NGX_AF_OK;
 }

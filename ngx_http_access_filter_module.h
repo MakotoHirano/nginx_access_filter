@@ -36,6 +36,7 @@ typedef struct {
 	ngx_uint_t bucket_size;          // max size of bucket to hold each ip.
 	char* except_regex;              // except_regex of target filename
 	char* storage;                   // storage of user access data.
+	char* memcached_servers;          // identifiers of servers of memcached.
 } ngx_http_access_filter_conf_t;
 
 ngx_http_request_t *ctx_r;

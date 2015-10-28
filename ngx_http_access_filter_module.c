@@ -83,6 +83,14 @@ static ngx_command_t ngx_http_access_filter_commands[] = {
 		offsetof(ngx_http_access_filter_conf_t, storage),
 		NULL
 	},
+	{
+		ngx_string("access_filter_memcached_servers"),
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+		ngx_conf_set_str_slot,
+		NGX_HTTP_MAIN_CONF_OFFSET,
+		offsetof(ngx_http_access_filter_conf_t, memcached_servers),
+		NULL
+	},
 
 	ngx_null_command
 };
@@ -203,6 +211,7 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 	conf->bucket_size        = NGX_CONF_UNSET_UINT;
 	conf->except_regex       = NGX_CONF_UNSET_PTR;
 	conf->storage            = NGX_CONF_UNSET_PTR;
+	conf->memcached_servers  = NGX_CONF_UNSET_PTR;
 
 	return conf;
 }
@@ -218,6 +227,7 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 	ngx_conf_init_uint_value(conf->bucket_size, 50);
 	ngx_conf_init_ptr_value(conf->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
 	ngx_conf_init_ptr_value(conf->storage, STORAGE_SHMEM);
+	ngx_conf_init_ptr_value(conf->memcached_servers, "--SERVER=127.0.0.1");
 
 	if (conf->enable != 1 && conf->enable != 0) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "enable must be on or off");
@@ -247,6 +257,13 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 	if ((strcmp(conf->storage, STORAGE_SHMEM) != 0) && (strcmp(conf->storage, STORAGE_MEMCACHED) != 0)) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "storage must be %s or %s.", STORAGE_SHMEM, STORAGE_MEMCACHED);
 		return NGX_CONF_ERROR;
+	}
+
+	if (strcmp(conf->storage, STORAGE_MEMCACHED) == 0) {
+		if (strlen(conf->memcached_servers) == 0) {
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "memcached_servers must be set.");
+			return NGX_CONF_ERROR;
+		}
 	}
 
 	ngx_conf_log_error(NGX_LOG_NOTICE, cf, 0, "access_filter merge conf done. enable: %d, threshold_interval: %d, threshold_count: %d, time_to_be_banned: %d, bucket_size: %d",
