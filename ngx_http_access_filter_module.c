@@ -140,7 +140,13 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		accessor.fin = fin_shmem;
 
 	} else if (strcmp(afcf->storage, STORAGE_MEMCACHED) == 0) {
-		// TODO implements.
+		accessor.init = init_memcached;
+		accessor.get_entry = get_entry_memcached;
+		accessor.get_data = get_data_memcached;
+		accessor.add_count = add_count_memcached;
+		accessor.update_entry = update_entry_memcached;
+		accessor.create_entry = create_entry_memcached;
+		accessor.fin = fin_memcached;
 
 	} else {
 		// exit
@@ -190,13 +196,13 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 		return NGX_CONF_ERROR;
 	}
 
-	conf->enable = NGX_CONF_UNSET_UINT;
+	conf->enable             = NGX_CONF_UNSET_UINT;
 	conf->threshold_interval = NGX_CONF_UNSET_UINT;
-	conf->threshold_count = NGX_CONF_UNSET_UINT;
-	conf->time_to_be_banned = NGX_CONF_UNSET_UINT;
-	conf->bucket_size = NGX_CONF_UNSET_UINT;
-	conf->except_regex = NGX_CONF_UNSET_PTR;
-	conf->storage = NGX_CONF_UNSET_PTR;
+	conf->threshold_count    = NGX_CONF_UNSET_UINT;
+	conf->time_to_be_banned  = NGX_CONF_UNSET_UINT;
+	conf->bucket_size        = NGX_CONF_UNSET_UINT;
+	conf->except_regex       = NGX_CONF_UNSET_PTR;
+	conf->storage            = NGX_CONF_UNSET_PTR;
 
 	return conf;
 }
