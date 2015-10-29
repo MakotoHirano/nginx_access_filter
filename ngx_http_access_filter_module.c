@@ -146,7 +146,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 	//
 	// initialize accessor functions.
 	//
-	if (strncmp(afcf->storage.data, STORAGE_SHMEM, strlen(STORAGE_SHMEM)) == 0) {
+	if (strcmp(afcf->storage, STORAGE_SHMEM) == 0) {
 		accessor.init = init_shmem;
 		accessor.get_entry = get_entry_shmem;
 		accessor.get_data = get_data_shmem;
@@ -156,7 +156,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		accessor.create_entry = create_entry_shmem;
 		accessor.fin = fin_shmem;
 
-	} else if (strncmp(afcf->storage.data, STORAGE_MEMCACHED, strlen(STORAGE_MEMCACHED)) == 0) {
+	} else if (strcmp(afcf->storage, STORAGE_MEMCACHED) == 0) {
 		accessor.init = init_memcached;
 		accessor.get_entry = get_entry_memcached;
 		accessor.get_data = get_data_memcached;
@@ -180,9 +180,9 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 	//
 	// compile regex.
 	//
-	regex = malloc(sizeof(char) * (afcf->except_regex.len + 1));
-	strncpy(regex, afcf->except_regex.data, afcf->except_regex.len);
-	regex[afcf->except_regex.len + 1] = '\0';
+	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
+	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
+	regex[strlen(afcf->except_regex)] = '\0';
 	regcomp(&regex_buffer, regex, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
 	free(regex);
 
@@ -219,9 +219,9 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 	conf->threshold_count           = NGX_CONF_UNSET_UINT;
 	conf->time_to_be_banned         = NGX_CONF_UNSET_UINT;
 	conf->bucket_size               = NGX_CONF_UNSET_UINT;
-	conf->except_regex.len          = 0;
-	conf->storage                   = ngx_null_string;
-	conf->memcached_server_host     = ngx_null_string;
+	conf->except_regex              = NGX_CONF_UNSET;
+	conf->storage                   = NGX_CONF_UNSET;
+	conf->memcached_server_host     = NGX_CONF_UNSET;
 	conf->memcached_server_port     = NGX_CONF_UNSET_UINT;
 
 	return conf;
