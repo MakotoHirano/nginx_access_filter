@@ -20,7 +20,7 @@
 typedef struct storage_entry_s storage_entry_t;
 
 struct storage_entry_s {
-	struct timeval last_access_time;
+	struct timeval first_access_time;
 	struct timeval banned_from;
 	unsigned int access_count;
 };
@@ -29,18 +29,20 @@ struct storage_entry_s {
  * directive struct
  */
 typedef struct {
-	ngx_flag_t enable;               // enable flag
-	ngx_uint_t threshold_interval;   // interval count as continuous access (milli second)
-	ngx_uint_t threshold_count;      // continuous count to be banned.
-	ngx_uint_t time_to_be_banned;    // limited interval to access site. (second)
-	ngx_uint_t bucket_size;          // max size of bucket to hold each ip.
-	char* except_regex;              // except_regex of target filename
-	char* storage;                   // storage of user access data.
-	char* memcached_servers;          // identifiers of servers of memcached.
+	ngx_flag_t enable;                // enable flag
+	ngx_uint_t threshold_interval;    // interval count as continuous access (milli second)
+	ngx_uint_t threshold_count;       // continuous count to be banned.
+	ngx_uint_t time_to_be_banned;     // limited interval to access site. (second)
+	ngx_uint_t bucket_size;           // max size of bucket to hold each ip.
+	ngx_str_t except_regex;           // except_regex of target filename
+	ngx_str_t storage;                // storage of user access data.
+	ngx_str_t memcached_server_host;  // identifiers of servers of memcached.
+	ngx_uint_t memcached_server_port; // identifiers of servers of memcached.
 } ngx_http_access_filter_conf_t;
 
 ngx_http_request_t *ctx_r;
 
 #include "storage_module_shmem.h"
+#include "storage_module_memcached.h"
 
 #endif

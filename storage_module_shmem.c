@@ -74,14 +74,18 @@ storage_entry_t* get_data_shmem(void *entry_p)
 		return NULL;
 	}
 
-	hashtable_entry_t *hash_p = (hashtable_entry_t*) entry_p;
-
-	return &hash_p->data;
+	return &((hashtable_entry_t*) entry_p)->data;
 }
 
-int add_count_shmem(storage_entry_t *data, ngx_http_access_filter_conf_t *afcf)
+void free_entry_shmem(void *entry_p)
 {
-	if (data == NULL || afcf == NULL) {
+	// do nothing.
+	return;
+}
+
+int add_count_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf)
+{
+	if (entry_p == NULL || afcf == NULL) {
 		return NGX_AF_OK;
 	}
 
@@ -90,7 +94,7 @@ int add_count_shmem(storage_entry_t *data, ngx_http_access_filter_conf_t *afcf)
 		return NGX_AF_NG;
 	}
 
-	data->access_count++;
+	((hashtable_entry_t*) entry_p)->data.access_count++;
 
 	if (_ctl_semaphore(UNLOCK) == NGX_AF_NG) {
 		ngx_log_error(NGX_LOG_ERR, ctx_r->connection->log, 0, "failed to unlock semaphore.");
@@ -215,7 +219,7 @@ void _reconstruct_reference(hashtable_entry_t *he, unsigned int bucket_size)
 	// initialize (except ip)
 	//
 	he->data.access_count = 1;
-	gettimeofday(&he->data.last_access_time, NULL);
+	gettimeofday(&he->data.first_access_time, NULL);
 	timerclear(&he->data.banned_from);
 
 	if (hashtable_ptr[hash] != he) {
@@ -239,7 +243,7 @@ void _create_reference(char *remote_ip, unsigned int bucket_size)
 	// initialize
 	//
 	he->data.access_count = 1;
-	gettimeofday(&he->data.last_access_time, NULL);
+	gettimeofday(&he->data.first_access_time, NULL);
 	timerclear(&he->data.banned_from);
 
 	len = strlen(remote_ip);
@@ -354,7 +358,7 @@ int _initialize_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf)
 	hashtable_ptr = hashtable_pp = (hashtable_entry_t**) ((char *) shm_ptr + (sizeof(fifo_entry_t) + sizeof(fifo_entry_t*) + sizeof(hashtable_entry_t)) * afcf->bucket_size);
 	for (i=0; i<afcf->bucket_size; i++) {
 		hashtable_p[i].ip[0] = '\0';
-		gettimeofday(&hashtable_p[i].data.last_access_time, NULL);
+		gettimeofday(&hashtable_p[i].data.first_access_time, NULL);
 		timerclear(&hashtable_p[i].data.banned_from);
 		hashtable_p[i].data.access_count = 0;
 		hashtable_p[i].p_next = NULL;

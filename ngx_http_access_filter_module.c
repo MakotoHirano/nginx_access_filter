@@ -2,14 +2,14 @@
 #include "ngx_http_access_filter_module.h"
 
 /**
- * function pointers.
- * it behaves like interface.
+ * function pointers. these behave like interface.
  */
 typedef struct {
 	int (*init)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
 	void* (*get_entry)(char *key, ngx_http_access_filter_conf_t *afcf);
 	storage_entry_t* (*get_data)(void *entry_p);
-	int (*add_count)(storage_entry_t *data, ngx_http_access_filter_conf_t *afcf);
+	void (*free_entry)(void *entry_p);
+	int (*add_count)(char *key, void *data, ngx_http_access_filter_conf_t *afcf);
 	int (*update_entry)(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
 	int (*create_entry)(char *key, ngx_http_access_filter_conf_t *afcf);
 	int (*fin)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
@@ -84,11 +84,19 @@ static ngx_command_t ngx_http_access_filter_commands[] = {
 		NULL
 	},
 	{
-		ngx_string("access_filter_memcached_servers"),
+		ngx_string("access_filter_memcached_server_host"),
 		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
 		ngx_conf_set_str_slot,
 		NGX_HTTP_MAIN_CONF_OFFSET,
-		offsetof(ngx_http_access_filter_conf_t, memcached_servers),
+		offsetof(ngx_http_access_filter_conf_t, memcached_server_host),
+		NULL
+	},
+	{
+		ngx_string("access_filter_memcached_server_port"),
+		NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE1,
+		ngx_conf_set_num_slot,
+		NGX_HTTP_MAIN_CONF_OFFSET,
+		offsetof(ngx_http_access_filter_conf_t, memcached_server_port),
 		NULL
 	},
 
@@ -138,19 +146,21 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 	//
 	// initialize accessor functions.
 	//
-	if (strcmp(afcf->storage, STORAGE_SHMEM) == 0) {
+	if (strncmp(afcf->storage.data, STORAGE_SHMEM, strlen(STORAGE_SHMEM)) == 0) {
 		accessor.init = init_shmem;
 		accessor.get_entry = get_entry_shmem;
 		accessor.get_data = get_data_shmem;
+		accessor.free_entry = free_entry_shmem;
 		accessor.add_count = add_count_shmem;
 		accessor.update_entry = update_entry_shmem;
 		accessor.create_entry = create_entry_shmem;
 		accessor.fin = fin_shmem;
 
-	} else if (strcmp(afcf->storage, STORAGE_MEMCACHED) == 0) {
+	} else if (strncmp(afcf->storage.data, STORAGE_MEMCACHED, strlen(STORAGE_MEMCACHED)) == 0) {
 		accessor.init = init_memcached;
 		accessor.get_entry = get_entry_memcached;
 		accessor.get_data = get_data_memcached;
+		accessor.free_entry = free_entry_memcached;
 		accessor.add_count = add_count_memcached;
 		accessor.update_entry = update_entry_memcached;
 		accessor.create_entry = create_entry_memcached;
@@ -170,9 +180,9 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 	//
 	// compile regex.
 	//
-	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
-	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
-	regex[strlen(afcf->except_regex)] = '\0';
+	regex = malloc(sizeof(char) * (afcf->except_regex.len + 1));
+	strncpy(regex, afcf->except_regex.data, afcf->except_regex.len);
+	regex[afcf->except_regex.len + 1] = '\0';
 	regcomp(&regex_buffer, regex, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
 	free(regex);
 
@@ -204,14 +214,15 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 		return NGX_CONF_ERROR;
 	}
 
-	conf->enable             = NGX_CONF_UNSET_UINT;
-	conf->threshold_interval = NGX_CONF_UNSET_UINT;
-	conf->threshold_count    = NGX_CONF_UNSET_UINT;
-	conf->time_to_be_banned  = NGX_CONF_UNSET_UINT;
-	conf->bucket_size        = NGX_CONF_UNSET_UINT;
-	conf->except_regex       = NGX_CONF_UNSET_PTR;
-	conf->storage            = NGX_CONF_UNSET_PTR;
-	conf->memcached_servers  = NGX_CONF_UNSET_PTR;
+	conf->enable                    = NGX_CONF_UNSET_UINT;
+	conf->threshold_interval        = NGX_CONF_UNSET_UINT;
+	conf->threshold_count           = NGX_CONF_UNSET_UINT;
+	conf->time_to_be_banned         = NGX_CONF_UNSET_UINT;
+	conf->bucket_size               = NGX_CONF_UNSET_UINT;
+	conf->except_regex.len          = 0;
+	conf->storage                   = ngx_null_string;
+	conf->memcached_server_host     = ngx_null_string;
+	conf->memcached_server_port     = NGX_CONF_UNSET_UINT;
 
 	return conf;
 }
@@ -227,7 +238,8 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 	ngx_conf_init_uint_value(conf->bucket_size, 50);
 	ngx_conf_init_ptr_value(conf->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
 	ngx_conf_init_ptr_value(conf->storage, STORAGE_SHMEM);
-	ngx_conf_init_ptr_value(conf->memcached_servers, "--SERVER=127.0.0.1");
+	ngx_conf_init_ptr_value(conf->memcached_server_host, "127.0.0.1");
+	ngx_conf_init_uint_value(conf->memcached_server_port, 11211);
 
 	if (conf->enable != 1 && conf->enable != 0) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "enable must be on or off");
@@ -260,8 +272,16 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 	}
 
 	if (strcmp(conf->storage, STORAGE_MEMCACHED) == 0) {
-		if (strlen(conf->memcached_servers) == 0) {
-			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "memcached_servers must be set.");
+		if (strlen(conf->memcached_server_host) == 0) {
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "memcached_server_host must be set.");
+			return NGX_CONF_ERROR;
+		}
+		if (conf->memcached_server_port < 0) {
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "memcached_server_port must be set.");
+			return NGX_CONF_ERROR;
+		}
+		if (conf->threshold_interval < 1000) {
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "threshold_interval must be greather than 1000 msec. if you use memcached as storage.");
 			return NGX_CONF_ERROR;
 		}
 	}
@@ -361,18 +381,18 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 			}
 		}
 
-		timersub(&now, &data_exist_p->last_access_time, &diff);
+		timersub(&now, &data_exist_p->first_access_time, &diff);
 		elapsed = (double) diff.tv_sec + ((double) diff.tv_usec / 1000.0 / 1000.0);
 		ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "access elapsed: %.3f, threshold: %.3f", elapsed, afcf->threshold_interval/1000.0);
 
-		if ((timerisset(&data_exist_p->last_access_time) == 0) || (elapsed >= (double) afcf->threshold_interval / 1000.0)) {
+		if ((timerisset(&data_exist_p->first_access_time) == 0) || (elapsed >= (double) afcf->threshold_interval / 1000.0)) {
 			if ((accessor.update_entry != NULL) && (accessor.update_entry(remote_ip, entry_exist_p, afcf) == NGX_AF_NG)) {
 				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to update_entry.");
 				return NGX_DECLINED;
 			}
 
 		} else {
-			if ((accessor.add_count != NULL) && (accessor.add_count(data_exist_p, afcf) == NGX_AF_NG)) {
+			if ((accessor.add_count != NULL) && (accessor.add_count(remote_ip, entry_exist_p, afcf) == NGX_AF_NG)) {
 				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to add_count.");
 				return NGX_DECLINED;
 			}
@@ -382,7 +402,7 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 			//
 			if (data_exist_p->access_count >= afcf->threshold_count) {
 				ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "over access. ip: %s, count: %d", remote_ip, data_exist_p->access_count);
-				timerclear(&data_exist_p->last_access_time);
+				timerclear(&data_exist_p->first_access_time);
 				gettimeofday(&data_exist_p->banned_from, NULL);
 				return NGX_HTTP_FORBIDDEN;
 			}
@@ -393,6 +413,10 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to create_entry.");
 			return NGX_DECLINED;
 		}
+	}
+
+	if (accessor.free_entry != NULL) {
+		accessor.free_entry(entry_exist_p);
 	}
 
 	ngx_pfree(r->pool, remote_ip);
