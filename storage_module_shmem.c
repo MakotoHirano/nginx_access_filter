@@ -1,3 +1,4 @@
+/* Makoto Hiano. All rights reserved. */
 #include "storage_module_shmem.h"
 
 static fifo_entry_t **fifo_ptr;

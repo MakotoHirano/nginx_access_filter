@@ -146,7 +146,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 	//
 	// initialize accessor functions.
 	//
-	if (strcmp(afcf->storage, STORAGE_SHMEM) == 0) {
+	if (strncmp(afcf->storage.data, STORAGE_SHMEM, strlen(STORAGE_SHMEM)) == 0) {
 		accessor.init = init_shmem;
 		accessor.get_entry = get_entry_shmem;
 		accessor.get_data = get_data_shmem;
@@ -156,7 +156,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		accessor.create_entry = create_entry_shmem;
 		accessor.fin = fin_shmem;
 
-	} else if (strcmp(afcf->storage, STORAGE_MEMCACHED) == 0) {
+	} else if (strncmp(afcf->storage.data, STORAGE_MEMCACHED, strlen(STORAGE_MEMCACHED)) == 0) {
 		accessor.init = init_memcached;
 		accessor.get_entry = get_entry_memcached;
 		accessor.get_data = get_data_memcached;
@@ -168,7 +168,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 
 	} else {
 		// exit
-		ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "init_module invalid storage type found: %s", afcf->storage);
+		ngx_log_error(NGX_LOG_EMERG, cycle->log, 0, "init_module invalid storage type found: %s", afcf->storage.data);
 		return NGX_ERROR;
 	}
 
@@ -180,9 +180,9 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 	//
 	// compile regex.
 	//
-	regex = malloc(sizeof(char) * (strlen(afcf->except_regex) + 1));
-	strncpy(regex, afcf->except_regex, strlen(afcf->except_regex));
-	regex[strlen(afcf->except_regex)] = '\0';
+	regex = malloc(sizeof(char) * (afcf->except_regex.len + 1));
+	strncpy(regex, afcf->except_regex.data, afcf->except_regex.len);
+	regex[afcf->except_regex.len] = '\0';
 	regcomp(&regex_buffer, regex, REG_EXTENDED|REG_NEWLINE|REG_NOSUB);
 	free(regex);
 
@@ -214,15 +214,18 @@ static void * ngx_http_access_filter_create_conf(ngx_conf_t *cf)
 		return NGX_CONF_ERROR;
 	}
 
-	conf->enable                    = NGX_CONF_UNSET_UINT;
-	conf->threshold_interval        = NGX_CONF_UNSET_UINT;
-	conf->threshold_count           = NGX_CONF_UNSET_UINT;
-	conf->time_to_be_banned         = NGX_CONF_UNSET_UINT;
-	conf->bucket_size               = NGX_CONF_UNSET_UINT;
-	conf->except_regex              = NGX_CONF_UNSET;
-	conf->storage                   = NGX_CONF_UNSET;
-	conf->memcached_server_host     = NGX_CONF_UNSET;
-	conf->memcached_server_port     = NGX_CONF_UNSET_UINT;
+	conf->enable                        = NGX_CONF_UNSET_UINT;
+	conf->threshold_interval            = NGX_CONF_UNSET_UINT;
+	conf->threshold_count               = NGX_CONF_UNSET_UINT;
+	conf->time_to_be_banned             = NGX_CONF_UNSET_UINT;
+	conf->bucket_size                   = NGX_CONF_UNSET_UINT;
+	conf->except_regex.len              = 0;
+	conf->except_regex.data             = NULL;
+	conf->storage.len                   = 0;
+	conf->storage.data                  = NULL;
+	conf->memcached_server_host.len     = 0;
+	conf->memcached_server_host.data    = NULL;
+	conf->memcached_server_port         = NGX_CONF_UNSET_UINT;
 
 	return conf;
 }
@@ -236,9 +239,21 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 	ngx_conf_init_uint_value(conf->threshold_count, 10);
 	ngx_conf_init_uint_value(conf->time_to_be_banned, 60 * 60); // sec
 	ngx_conf_init_uint_value(conf->bucket_size, 50);
-	ngx_conf_init_ptr_value(conf->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
-	ngx_conf_init_ptr_value(conf->storage, STORAGE_SHMEM);
-	ngx_conf_init_ptr_value(conf->memcached_server_host, "127.0.0.1");
+	if (conf->except_regex.len == 0) {
+		conf->except_regex.data = "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??";
+		conf->except_regex.len = strlen(conf->except_regex.data);
+	}
+	if (conf->storage.len == 0) {
+		conf->storage.data = STORAGE_SHMEM;
+		conf->storage.len = strlen(STORAGE_SHMEM);
+	}
+	if (conf->memcached_server_host.len == 0) {
+		conf->memcached_server_host.data = "127.0.0.1";
+		conf->memcached_server_host.len = strlen(conf->memcached_server_host.data);
+	}
+	// ngx_conf_init_value(conf->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
+	// ngx_conf_init_value(conf->storage, STORAGE_SHMEM);
+	// ngx_conf_init_value(conf->memcached_server_host, "127.0.0.1");
 	ngx_conf_init_uint_value(conf->memcached_server_port, 11211);
 
 	if (conf->enable != 1 && conf->enable != 0) {
@@ -266,13 +281,13 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 		return NGX_CONF_ERROR;
 	}
 
-	if ((strcmp(conf->storage, STORAGE_SHMEM) != 0) && (strcmp(conf->storage, STORAGE_MEMCACHED) != 0)) {
+	if ((strncmp(conf->storage.data, STORAGE_SHMEM, strlen(STORAGE_SHMEM)) != 0) && (strncmp(conf->storage.data, STORAGE_MEMCACHED, strlen(STORAGE_MEMCACHED)) != 0)) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "storage must be %s or %s.", STORAGE_SHMEM, STORAGE_MEMCACHED);
 		return NGX_CONF_ERROR;
 	}
 
-	if (strcmp(conf->storage, STORAGE_MEMCACHED) == 0) {
-		if (strlen(conf->memcached_server_host) == 0) {
+	if (strncmp(conf->storage.data, STORAGE_MEMCACHED, strlen(STORAGE_MEMCACHED)) == 0) {
+		if (conf->memcached_server_host.len == 0) {
 			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "memcached_server_host must be set.");
 			return NGX_CONF_ERROR;
 		}

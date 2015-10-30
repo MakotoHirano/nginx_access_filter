@@ -1,3 +1,4 @@
+/* Makoto Hiano. All rights reserved. */
 #include "storage_module_shmem.h"
 #include <libmemcached/memcached.h>
 
@@ -155,7 +156,7 @@ static char* _compose(memcached_entry_t *entry)
 	size = strlen(buff);
 	value = malloc(sizeof(char) * (size+1));
 	strncpy(value, buff, size);
-	value[size+1] = '\0';
+	value[size] = '\0';
 
 	return value;
 }
@@ -165,9 +166,15 @@ static int _connect(ngx_http_access_filter_conf_t *afcf)
 	memcached_return rc;
 
 	if (servers == NULL) {
+		char *host = malloc(sizeof(char) * (afcf->memcached_server_host.len + 1));
+		strncpy(host, afcf->memcached_server_host.data, afcf->memcached_server_host.len);
+		host[afcf->memcached_server_host.len] = '\0';
+
 		memc = memcached_create(NULL);
-		servers = memcached_server_list_append(servers, afcf->memcached_server_host, afcf->memcached_server_port, &rc);
+		servers = memcached_server_list_append(servers, host, afcf->memcached_server_port, &rc);
 		rc = memcached_server_push(memc, servers);
+
+		free(host);
 
 		if (rc = MEMCACHED_SUCCESS) {
 			return NGX_AF_NG;
@@ -228,15 +235,15 @@ static char* _get(char *remote_ip)
 static char* _create_key(char *remote_ip)
 {
 	char *fullkey;
-	int size = strlen(remote_ip) + strlen(MEMCACHED_KEY_PREFIX) + 1;
-	fullkey = malloc(sizeof(char) * size);
+	int size = strlen(remote_ip) + strlen(MEMCACHED_KEY_PREFIX);
+	fullkey = malloc(sizeof(char) * (size + 1));
 
-	fullkey = strncpy(fullkey, MEMCACHED_SUCCESS, strlen(MEMCACHED_KEY_PREFIX));
-	fullkey = strncpy(fullkey[strlen(MEMCACHED_KEY_PREFIX)], remote_ip, strlen(remote_ip));
+	strncpy(fullkey, MEMCACHED_KEY_PREFIX, strlen(MEMCACHED_KEY_PREFIX));
+	strncpy(&fullkey[strlen(MEMCACHED_KEY_PREFIX)], remote_ip, strlen(remote_ip));
 	fullkey[size] = '\0';
 
 #ifdef DEBUG
-	ngx_log_error(NGX_LOG_NOTICE, ctx_r->connection->log, 0, "_create_key called. remote_ip: %s, key: %s", remote_ip, fullkey);
+	ngx_log_error(NGX_LOG_DEBUG, ctx_r->connection->log, 0, "_create_key called. remote_ip: %s, key: %s", remote_ip, fullkey);
 #endif
 
 	return fullkey;
