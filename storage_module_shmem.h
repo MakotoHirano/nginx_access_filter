@@ -46,6 +46,7 @@ void* get_entry_shmem(char *key, ngx_http_access_filter_conf_t *afcf);
 storage_entry_t* get_data_shmem(void *entry_p);
 void free_entry_shmem(void *entry_p);
 int add_count_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
+int set_banned_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
 int update_entry_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
 int create_entry_shmem(char *key, ngx_http_access_filter_conf_t *afcf);
 int fin_shmem(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);

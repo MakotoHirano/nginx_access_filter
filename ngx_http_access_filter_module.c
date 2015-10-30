@@ -10,6 +10,7 @@ typedef struct {
 	storage_entry_t* (*get_data)(void *entry_p);
 	void (*free_entry)(void *entry_p);
 	int (*add_count)(char *key, void *data, ngx_http_access_filter_conf_t *afcf);
+	int (*set_banned)(char *key, void *data, ngx_http_access_filter_conf_t *afcf);
 	int (*update_entry)(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
 	int (*create_entry)(char *key, ngx_http_access_filter_conf_t *afcf);
 	int (*fin)(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);
@@ -152,6 +153,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		accessor.get_data = get_data_shmem;
 		accessor.free_entry = free_entry_shmem;
 		accessor.add_count = add_count_shmem;
+		accessor.set_banned = set_banned_shmem;
 		accessor.update_entry = update_entry_shmem;
 		accessor.create_entry = create_entry_shmem;
 		accessor.fin = fin_shmem;
@@ -162,6 +164,7 @@ static ngx_int_t init_module(ngx_cycle_t *cycle)
 		accessor.get_data = get_data_memcached;
 		accessor.free_entry = free_entry_memcached;
 		accessor.add_count = add_count_memcached;
+		accessor.set_banned = set_banned_memcached;
 		accessor.update_entry = update_entry_memcached;
 		accessor.create_entry = create_entry_memcached;
 		accessor.fin = fin_memcached;
@@ -239,6 +242,8 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 	ngx_conf_init_uint_value(conf->threshold_count, 10);
 	ngx_conf_init_uint_value(conf->time_to_be_banned, 60 * 60); // sec
 	ngx_conf_init_uint_value(conf->bucket_size, 50);
+	ngx_conf_init_uint_value(conf->memcached_server_port, 11211);
+
 	if (conf->except_regex.len == 0) {
 		conf->except_regex.data = "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??";
 		conf->except_regex.len = strlen(conf->except_regex.data);
@@ -251,10 +256,6 @@ static char * ngx_http_access_filter_init_conf(ngx_conf_t *cf, void *_conf)
 		conf->memcached_server_host.data = "127.0.0.1";
 		conf->memcached_server_host.len = strlen(conf->memcached_server_host.data);
 	}
-	// ngx_conf_init_value(conf->except_regex, "\\.(js|css|mp3|ogg|wav|png|jpeg|jpg|gif|ico|woff|swf)\\??");
-	// ngx_conf_init_value(conf->storage, STORAGE_SHMEM);
-	// ngx_conf_init_value(conf->memcached_server_host, "127.0.0.1");
-	ngx_conf_init_uint_value(conf->memcached_server_port, 11211);
 
 	if (conf->enable != 1 && conf->enable != 0) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "enable must be on or off");
@@ -417,8 +418,9 @@ static ngx_int_t ngx_http_access_filter_handler(ngx_http_request_t *r)
 			//
 			if (data_exist_p->access_count >= afcf->threshold_count) {
 				ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0, "over access. ip: %s, count: %d", remote_ip, data_exist_p->access_count);
-				timerclear(&data_exist_p->first_access_time);
-				gettimeofday(&data_exist_p->banned_from, NULL);
+				if ((accessor.set_banned != NULL) && (accessor.set_banned(remote_ip, entry_exist_p, afcf) == NGX_AF_NG)) {
+					ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "failed to set_banned.");
+				}
 				return NGX_HTTP_FORBIDDEN;
 			}
 		}

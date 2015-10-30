@@ -68,7 +68,6 @@ int add_count_memcached(char *key, void *entry_p, ngx_http_access_filter_conf_t 
 	//
 	// update data.
 	//
-
 	memcached_entry_t *me_p = (memcached_entry_t*) entry_p;
 	struct timeval now, diff;
 	time_t expire_sec;
@@ -84,7 +83,20 @@ int add_count_memcached(char *key, void *entry_p, ngx_http_access_filter_conf_t 
 	if (expire_sec <= 0) {
 		expire_sec = 1;
 	}
+	_set(key, entry_p, expire_sec);
 
+	return NGX_AF_OK;
+}
+
+int set_banned_memcached(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf)
+{
+	memcached_entry_t *me_p = (memcached_entry_t*) entry_p;
+	time_t expire_sec;
+
+	timerclear(&me_p->data.first_access_time);
+	gettimeofday(&me_p->data.banned_from, NULL);
+
+	expire_sec = afcf->time_to_be_banned + 1;
 	_set(key, entry_p, expire_sec);
 
 	return NGX_AF_OK;

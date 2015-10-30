@@ -26,6 +26,7 @@ void* get_entry_memcached(char *key, ngx_http_access_filter_conf_t *afcf);
 storage_entry_t* get_data_memcached(void *entry_p);
 void free_entry_memcached(void *entry_p);
 int add_count_memcached(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
+int set_banned_memcached(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
 int update_entry_memcached(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf);
 int create_entry_memcached(char *key, ngx_http_access_filter_conf_t *afcf);
 int fin_memcached(ngx_cycle_t *cycle, ngx_http_access_filter_conf_t *afcf);

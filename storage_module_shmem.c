@@ -105,6 +105,16 @@ int add_count_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afc
 	return NGX_AF_OK;
 }
 
+int set_banned_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf)
+{
+	hashtable_entry_t *he_p = (hashtable_entry_t*) entry_p;
+
+	timerclear(&he_p->data.first_access_time);
+	gettimeofday(&he_p->data.banned_from, NULL);
+
+	return NGX_AF_OK;
+}
+
 int update_entry_shmem(char *key, void *entry_p, ngx_http_access_filter_conf_t *afcf)
 {
 	if (key == NULL || entry_p == NULL || strlen(key) == 0 || afcf == NULL) {
